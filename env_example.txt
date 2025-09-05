@@ -1,0 +1,14 @@
+# Environment variables for the Car Catalog RAG API
+# Copy this file to .env and fill in your actual API keys
+
+# Mistral API Key for OCR processing
+MISTRAL_API_KEY=your_mistral_api_key_here
+
+# OpenAI API Key for embeddings and LLM
+OPENAI_API_KEY=your_openai_api_key_here
+
+# Optional: Customize the port
+PORT=8000
+
+# Optional: Customize the host
+HOST=0.0.0.0
