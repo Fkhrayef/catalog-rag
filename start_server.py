@@ -14,6 +14,8 @@ def main():
     # Check if API keys are set
     mistral_key = os.getenv("MISTRAL_API_KEY")
     openai_key = os.getenv("OPENAI_API_KEY")
+    aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
+    aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
     
     if not mistral_key or mistral_key == "your_mistral_api_key_here":
         print("❌ Error: MISTRAL_API_KEY not set or using placeholder value")
@@ -26,6 +28,12 @@ def main():
         sys.exit(1)
     
     print("✅ API keys configured")
+    
+    # Check S3 configuration (optional)
+    if aws_access_key and aws_secret_key and aws_access_key != "your_aws_access_key_here":
+        print("✅ S3 configuration detected")
+    else:
+        print("⚠️  S3 not configured - only local PDF processing available")
     print("🚀 Starting Car Catalog RAG API...")
     
     # Import and run the FastAPI app

@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import os
 from datetime import datetime
 from catalog import CarCatalogRAG
@@ -16,6 +16,7 @@ rag_system = None
 
 class QuestionRequest(BaseModel):
     question: str
+    document_name: str  # Required: specific document/catalog to query
 
 class QuestionResponse(BaseModel):
     answer: str
@@ -23,10 +24,21 @@ class QuestionResponse(BaseModel):
     sources: List[Dict[str, Any]]
     metadata: Dict[str, Any] = {}
 
+class ProcessS3Request(BaseModel):
+    s3_url: str
+    document_name: str = "User Catalog"
+
+class ProcessS3Response(BaseModel):
+    message: str
+    documents_created: int
+    status: str
+    s3_url: str
+
 class HealthResponse(BaseModel):
     status: str
     message: str
     documents_loaded: int = 0
+    s3_enabled: bool = False
 
 @app.on_event("startup")
 async def startup_event():
@@ -40,18 +52,31 @@ async def startup_event():
     if not mistral_api_key or not openai_api_key:
         raise ValueError("MISTRAL_API_KEY and OPENAI_API_KEY environment variables must be set")
     
+    # Get AWS credentials for S3 (optional)
+    aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
+    aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+    aws_region = os.getenv("AWS_REGION", "us-east-1")
+    
     # Initialize RAG system
     rag_system = CarCatalogRAG(
         mistral_api_key=mistral_api_key,
         openai_api_key=openai_api_key,
-        persist_directory="./chroma_db"
+        persist_directory="./chroma_db",
+        aws_access_key=aws_access_key,
+        aws_secret_key=aws_secret_key,
+        aws_region=aws_region
     )
     
     # Try to load existing documents
     try:
         rag_system.load_documents("car_documents.json")
-        rag_system.setup_vectorstore()
-        rag_system.setup_rag_chain()
+        # Setup vector stores and RAG chains for all loaded documents
+        for document_name in rag_system.documents_by_name.keys():
+            try:
+                rag_system.setup_vectorstore_for_document(document_name)
+                rag_system.setup_rag_chain_for_document(document_name)
+            except Exception as e:
+                print(f"Error setting up vector store for {document_name}: {e}")
         print("RAG system initialized successfully with existing documents")
     except FileNotFoundError:
         print("No existing documents found. Please process PDF first using /process-pdf endpoint")
@@ -73,24 +98,26 @@ async def health_check():
     return HealthResponse(
         status="healthy",
         message="RAG system is running",
-        documents_loaded=len(rag_system.all_documents) if rag_system.all_documents else 0
+        documents_loaded=sum(len(docs) for docs in rag_system.documents_by_name.values()) if rag_system.documents_by_name else 0,
+        s3_enabled=rag_system.s3_client is not None
     )
 
 @app.post("/ask", response_model=QuestionResponse)
 async def ask_question(request: QuestionRequest):
     """
-    Ask a question about the car manual
+    Ask a question about a specific document/catalog
     """
     global rag_system
     
     if rag_system is None:
         raise HTTPException(status_code=500, detail="RAG system not initialized")
     
-    if not rag_system.rag_chain:
-        raise HTTPException(status_code=500, detail="RAG chain not setup. Process PDF first.")
-    
     try:
-        result = rag_system.ask_question(request.question)
+        # Use the new architecture - document_name is required
+        result = rag_system.ask_question(
+            question=request.question,
+            document_name=request.document_name
+        )
         
         # Extract sources from context
         sources = []
@@ -98,6 +125,8 @@ async def ask_question(request: QuestionRequest):
             sources.append({
                 "page_number": ctx["metadata"].get("page_number"),
                 "document_name": ctx["metadata"].get("document_name"),
+                "document_type": ctx["metadata"].get("document_type", "unknown"),
+                "source": ctx["metadata"].get("source", "unknown"),
                 "content_preview": ctx["page_content"][:200] + "..." if len(ctx["page_content"]) > 200 else ctx["page_content"]
             })
         
@@ -107,6 +136,7 @@ async def ask_question(request: QuestionRequest):
             sources=sources,
             metadata={
                 "question": request.question,
+                "document_name": request.document_name,
                 "sources_count": len(sources),
                 "timestamp": datetime.utcnow().isoformat() + "Z",
                 "model": "gpt-4o-mini",
@@ -120,7 +150,7 @@ async def ask_question(request: QuestionRequest):
 @app.post("/process-pdf")
 async def process_pdf(pdf_path: str = "2022-nissan-altima-owner-manual.pdf"):
     """
-    Process a PDF file and create documents for RAG
+    Process a local PDF file and create documents for RAG
     """
     global rag_system
     
@@ -150,6 +180,42 @@ async def process_pdf(pdf_path: str = "2022-nissan-altima-owner-manual.pdf"):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
 
+@app.post("/process-s3", response_model=ProcessS3Response)
+async def process_s3_pdf(request: ProcessS3Request):
+    """
+    Process a PDF from S3 URL and create documents for RAG
+    """
+    global rag_system
+    
+    if rag_system is None:
+        raise HTTPException(status_code=500, detail="RAG system not initialized")
+    
+    if not rag_system.s3_client:
+        raise HTTPException(status_code=500, detail="S3 client not initialized. Provide AWS credentials.")
+    
+    try:
+        # Process PDF from S3
+        documents = rag_system.process_pdf_to_documents(request.s3_url, request.document_name)
+        
+        # Setup vector store for this specific document
+        rag_system.setup_vectorstore_for_document(request.document_name)
+        
+        # Setup RAG chain for this specific document
+        rag_system.setup_rag_chain_for_document(request.document_name)
+        
+        # Save documents
+        rag_system.save_documents("car_documents.json")
+        
+        return ProcessS3Response(
+            message=f"Successfully processed PDF from S3 and created {len(documents)} documents",
+            documents_created=len(documents),
+            status="ready",
+            s3_url=request.s3_url
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing S3 PDF: {str(e)}")
+
 @app.get("/documents/info")
 async def get_documents_info():
     """
@@ -160,18 +226,63 @@ async def get_documents_info():
     if rag_system is None:
         raise HTTPException(status_code=500, detail="RAG system not initialized")
     
-    if not rag_system.all_documents:
+    if not rag_system.documents_by_name:
         return {"message": "No documents loaded", "count": 0}
     
     # Get document statistics
-    total_pages = len(rag_system.all_documents)
-    document_names = list(set(doc.metadata.get("document_name", "Unknown") for doc in rag_system.all_documents))
+    total_docs = sum(len(docs) for docs in rag_system.documents_by_name.values())
+    document_names = list(rag_system.documents_by_name.keys())
     
     return {
-        "total_documents": total_pages,
+        "total_documents": total_docs,
         "document_names": document_names,
-        "vectorstore_ready": rag_system.vectorstore is not None,
-        "rag_chain_ready": rag_system.rag_chain is not None
+        "documents_count": {name: len(docs) for name, docs in rag_system.documents_by_name.items()},
+        "vectorstores_ready": len(rag_system.vectorstores),
+        "rag_chains_ready": len(rag_system.rag_chains),
+        "s3_enabled": rag_system.s3_client is not None
+    }
+
+@app.get("/documents/detailed")
+async def get_detailed_documents_info():
+    """
+    Get detailed information about loaded documents including metadata
+    """
+    global rag_system
+    
+    if rag_system is None:
+        raise HTTPException(status_code=500, detail="RAG system not initialized")
+    
+    if not rag_system.documents_by_name:
+        return {"message": "No documents loaded", "count": 0}
+    
+    # Group documents by document_name
+    documents_by_name = {}
+    for doc_name, documents in rag_system.documents_by_name.items():
+        pages = []
+        sources = set()
+        document_type = "unknown"
+        
+        for doc in documents:
+            pages.append(doc.metadata.get("page_number", 0))
+            sources.add(doc.metadata.get("source", "unknown"))
+            if document_type == "unknown":
+                document_type = doc.metadata.get("document_type", "unknown")
+        
+        documents_by_name[doc_name] = {
+            "count": len(documents),
+            "pages": sorted(pages),
+            "sources": list(sources),
+            "document_type": document_type,
+            "vectorstore_ready": doc_name in rag_system.vectorstores,
+            "rag_chain_ready": doc_name in rag_system.rag_chains
+        }
+    
+    total_docs = sum(len(docs) for docs in rag_system.documents_by_name.values())
+    
+    return {
+        "total_documents": total_docs,
+        "documents_by_name": documents_by_name,
+        "s3_enabled": rag_system.s3_client is not None
     }
 
 if __name__ == "__main__":
