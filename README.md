@@ -165,6 +165,61 @@ Returns the status of the RAG system.
 }
 ```
 
+### 5. Generate Maintenance Reminders
+
+**POST** `/generate-maintenance-reminders`
+
+Generates intelligent maintenance reminders based on current mileage (in kilometers) and car manual content.
+
+**Request Body:**
+
+```json
+{
+  "document_name": "Nissan Altima Manual",
+  "current_mileage": 44000,
+  "user_id": "user123"
+}
+```
+
+**Note:** `user_id` is optional and can be omitted.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "reminders": [
+    {
+      "type": "maintenance",
+      "dueDate": "2024-02-15",
+      "message": "Oil change due at 48,000 km",
+      "mileage": 48000,
+      "priority": "high",
+      "category": "oil_change"
+    },
+    {
+      "type": "maintenance",
+      "dueDate": "2024-03-01",
+      "message": "Tire rotation due at 48,000 km",
+      "mileage": 48000,
+      "priority": "medium",
+      "category": "tire_rotation"
+    },
+    {
+      "type": "maintenance",
+      "dueDate": "2024-04-15",
+      "message": "Brake fluid inspection due at 48,000 km",
+      "mileage": 48000,
+      "priority": "high",
+      "category": "brake_service"
+    }
+  ],
+  "document_name": "Nissan Altima Manual",
+  "current_mileage": 44000,
+  "generated_at": "2024-01-15T10:30:00Z"
+}
+```
+
 ## Usage Examples
 
 ### 1. Process Multiple Car Manuals
@@ -207,7 +262,28 @@ curl -X POST "http://localhost:8000/ask" \
      }'
 ```
 
-### 3. Check Available Documents
+### 3. Generate Maintenance Reminders
+
+```bash
+# Generate maintenance reminders for Nissan Altima with current mileage
+curl -X POST "http://localhost:8000/generate-maintenance-reminders" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "document_name": "Nissan Altima Manual",
+       "current_mileage": 44000,
+       "user_id": "user123"
+     }'
+
+# Or without user_id (simpler)
+curl -X POST "http://localhost:8000/generate-maintenance-reminders" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "document_name": "Nissan Altima Manual",
+       "current_mileage": 44000
+     }'
+```
+
+### 4. Check Available Documents
 
 ```bash
 curl -X GET "http://localhost:8000/documents/info"

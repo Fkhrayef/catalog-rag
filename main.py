@@ -40,6 +40,27 @@ class HealthResponse(BaseModel):
     documents_loaded: int = 0
     s3_enabled: bool = False
 
+class MaintenanceReminderRequest(BaseModel):
+    document_name: str
+    current_mileage: int  # Current mileage in kilometers
+    user_id: Optional[str] = None  # Optional user identifier
+
+class ReminderData(BaseModel):
+    type: str = "maintenance"
+    dueDate: str
+    message: str
+    mileage: Optional[int] = None
+    priority: str = "medium"
+    category: str = "general"
+
+class MaintenanceReminderResponse(BaseModel):
+    success: bool
+    reminders: List[ReminderData]
+    document_name: str
+    current_mileage: int
+    generated_at: str
+    error: Optional[str] = None
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize the RAG system on startup"""
@@ -284,6 +305,40 @@ async def get_detailed_documents_info():
         "documents_by_name": documents_by_name,
         "s3_enabled": rag_system.s3_client is not None
     }
+
+@app.post("/generate-maintenance-reminders", response_model=MaintenanceReminderResponse)
+async def generate_maintenance_reminders(request: MaintenanceReminderRequest):
+    """
+    Generate maintenance reminders based on current mileage and car manual content
+    """
+    global rag_system
+    
+    if rag_system is None:
+        raise HTTPException(status_code=500, detail="RAG system not initialized")
+    
+    try:
+        reminders = rag_system.generate_maintenance_reminders(
+            document_name=request.document_name,
+            current_mileage=request.current_mileage,
+            user_id=request.user_id
+        )
+        
+        return MaintenanceReminderResponse(
+            success=True,
+            reminders=[ReminderData(**reminder) for reminder in reminders],
+            document_name=request.document_name,
+            current_mileage=request.current_mileage,
+            generated_at=datetime.utcnow().isoformat() + "Z"
+        )
+    except Exception as e:
+        return MaintenanceReminderResponse(
+            success=False,
+            reminders=[],
+            document_name=request.document_name,
+            current_mileage=request.current_mileage,
+            generated_at=datetime.utcnow().isoformat() + "Z",
+            error=str(e)
+        )
 
 if __name__ == "__main__":
     import uvicorn

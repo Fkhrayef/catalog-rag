@@ -528,3 +528,143 @@ class CarCatalogRAG:
         
         total_docs = sum(len(docs) for docs in self.documents_by_name.values())
         print(f"Loaded {total_docs} documents across {len(self.documents_by_name)} document collections from {filepath}")
+    
+    def generate_maintenance_reminders(self, document_name: str, current_mileage: int, user_id: str = None):
+        """Generate maintenance reminders based on mileage and manual content"""
+        from datetime import datetime, timedelta
+        
+        if document_name not in self.rag_chains:
+            raise ValueError(f"Document '{document_name}' not found or RAG chain not ready")
+        
+        # Create a specialized prompt for maintenance extraction
+        maintenance_prompt = f"""
+        You are a car maintenance expert analyzing the {document_name}. Based on the current mileage of {current_mileage:,} kilometers, extract maintenance schedules and generate reminders.
+        
+        Please analyze the maintenance schedule and provide upcoming maintenance tasks in this exact JSON format:
+        {{
+            "reminders": [
+                {{
+                    "type": "maintenance",
+                    "dueDate": "YYYY-MM-DD",
+                    "message": "Specific maintenance task description",
+                    "mileage": 50000,
+                    "priority": "high",
+                    "category": "oil_change"
+                }}
+            ]
+        }}
+        
+        Focus on:
+        1. Immediate maintenance due (within 1,500 km of current mileage)
+        2. Upcoming maintenance (within 8,000 km of current mileage)
+        3. Regular maintenance intervals based on the manual
+        4. Safety-critical maintenance items
+        
+        Categories should be one of: oil_change, tire_rotation, brake_service, transmission_service, air_filter, spark_plugs, coolant_service, battery_service, general
+        Priority should be: high, medium, low
+        
+        Calculate realistic due dates based on average driving (1,500 km per month).
+        Use kilometers for all mileage values.
+        Return ONLY the JSON, no other text or explanation.
+        """
+        
+        try:
+            # Use the RAG chain to get maintenance information
+            result = self.rag_chains[document_name].invoke({
+                "input": maintenance_prompt
+            })
+            
+            # Parse the JSON response
+            import json
+            import re
+            
+            # Extract JSON from the response
+            answer = result["answer"]
+            
+            # Try to extract JSON from the response
+            json_match = re.search(r'\{.*\}', answer, re.DOTALL)
+            if json_match:
+                json_str = json_match.group()
+                maintenance_data = json.loads(json_str)
+            else:
+                # If no JSON found, return fallback reminders
+                return self._generate_fallback_reminders(current_mileage)
+            
+            # Convert to reminder format
+            reminders = []
+            for reminder in maintenance_data.get("reminders", []):
+                reminders.append({
+                    "type": "maintenance",
+                    "dueDate": reminder.get("dueDate", (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")),
+                    "message": reminder.get("message", "Maintenance required"),
+                    "mileage": reminder.get("mileage", current_mileage + 1000),
+                    "priority": reminder.get("priority", "medium"),
+                    "category": reminder.get("category", "general")
+                })
+            
+            return reminders
+            
+        except Exception as e:
+            print(f"Error generating maintenance reminders: {e}")
+            # Fallback: generate basic maintenance reminders
+            return self._generate_fallback_reminders(current_mileage)
+
+    def _generate_fallback_reminders(self, current_mileage: int):
+        """Generate basic maintenance reminders when RAG fails"""
+        from datetime import datetime, timedelta
+        
+        reminders = []
+        
+        # Oil change every 8,000 km
+        next_oil_change = ((current_mileage // 8000) + 1) * 8000
+        if next_oil_change - current_mileage <= 1500:
+            days_until = max(7, (next_oil_change - current_mileage) * 30 // 1500)  # Assume 1,500 km per month
+            reminders.append({
+                "type": "maintenance",
+                "dueDate": (datetime.now() + timedelta(days=days_until)).strftime("%Y-%m-%d"),
+                "message": f"Oil change due at {next_oil_change:,} km",
+                "mileage": next_oil_change,
+                "priority": "high",
+                "category": "oil_change"
+            })
+        
+        # Tire rotation every 12,000 km
+        next_tire_rotation = ((current_mileage // 12000) + 1) * 12000
+        if next_tire_rotation - current_mileage <= 3000:
+            days_until = max(14, (next_tire_rotation - current_mileage) * 30 // 1500)
+            reminders.append({
+                "type": "maintenance",
+                "dueDate": (datetime.now() + timedelta(days=days_until)).strftime("%Y-%m-%d"),
+                "message": f"Tire rotation due at {next_tire_rotation:,} km",
+                "mileage": next_tire_rotation,
+                "priority": "medium",
+                "category": "tire_rotation"
+            })
+        
+        # Air filter every 24,000 km
+        next_air_filter = ((current_mileage // 24000) + 1) * 24000
+        if next_air_filter - current_mileage <= 5000:
+            days_until = max(30, (next_air_filter - current_mileage) * 30 // 1500)
+            reminders.append({
+                "type": "maintenance",
+                "dueDate": (datetime.now() + timedelta(days=days_until)).strftime("%Y-%m-%d"),
+                "message": f"Air filter replacement due at {next_air_filter:,} km",
+                "mileage": next_air_filter,
+                "priority": "medium",
+                "category": "air_filter"
+            })
+        
+        # Brake service every 40,000 km
+        next_brake_service = ((current_mileage // 40000) + 1) * 40000
+        if next_brake_service - current_mileage <= 8000:
+            days_until = max(60, (next_brake_service - current_mileage) * 30 // 1500)
+            reminders.append({
+                "type": "maintenance",
+                "dueDate": (datetime.now() + timedelta(days=days_until)).strftime("%Y-%m-%d"),
+                "message": f"Brake inspection and service due at {next_brake_service:,} km",
+                "mileage": next_brake_service,
+                "priority": "high",
+                "category": "brake_service"
+            })
+        
+        return reminders
