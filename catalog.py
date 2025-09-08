@@ -138,10 +138,10 @@ class CarCatalogRAG:
             )
 
             return ocr_response
-            
+
         except Exception as e:
             if "max_tokens_per_request" in str(e) or "300000" in str(e):
-                print(f"PDF too large for single processing. Attempting to split into smaller chunks...")
+                print("PDF too large for single processing. Attempting to split into smaller chunks...")
                 return self._process_large_pdf_in_chunks(pdf_path)
             else:
                 raise e
@@ -275,7 +275,7 @@ class CarCatalogRAG:
         text = re.sub(r"[ \t]{2,}", " ", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
-    
+
     def remove_memo_tokens(self, text: str) -> str:
         """Remove MEMO tokens from text"""
         if not text:
@@ -287,12 +287,12 @@ class CarCatalogRAG:
             r'(?![A-Za-z0-9])',           # right boundary
             re.IGNORECASE
         )
-        
+
         cleaned = MEMO_RE.sub("", text)
         cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
         return cleaned.strip()
-    
+
     def process_pdf_to_documents(self, pdf_path_or_url: str, document_name: str = "Nissan Altima Manual"):
         """
         Process PDF and create documents for RAG
@@ -390,10 +390,10 @@ class CarCatalogRAG:
         
         # Create retriever
         retriever = vectorstore.as_retriever(
-            search_type="mmr",
-            search_kwargs={"k": 5, "fetch_k": 20, "lambda_mult": 0.5},
-        )
-        
+    search_type="mmr",
+    search_kwargs={"k": 5, "fetch_k": 20, "lambda_mult": 0.5},
+)
+
         # Store in dictionaries
         self.vectorstores[document_name] = vectorstore
         self.retrievers[document_name] = retriever
@@ -417,7 +417,7 @@ class CarCatalogRAG:
         """Setup RAG chain for a specific document"""
         if document_name not in self.retrievers:
             raise ValueError(f"Retriever for '{document_name}' not found. Setup vector store first.")
-        
+
         system_prompt = (
             f"You are an assistant for {document_name} question-answering tasks.\n"
             "Use the retrieved context to answer questions about this specific manual. "
@@ -425,12 +425,12 @@ class CarCatalogRAG:
             "Cite relevant page numbers when helpful. Format your answer clearly.\n\n"
             "{context}"
         )
-        
+
         prompt = ChatPromptTemplate.from_messages([
             ("system", system_prompt),
             ("human", "{input}"),
         ])
-        
+
         question_answer_chain = create_stuff_documents_chain(self.llm, prompt)
         rag_chain = create_retrieval_chain(self.retrievers[document_name], question_answer_chain)
         
@@ -537,10 +537,11 @@ class CarCatalogRAG:
             raise ValueError(f"Document '{document_name}' not found or RAG chain not ready")
         
         # Create a specialized prompt for maintenance extraction
+        today_str = datetime.utcnow().strftime("%Y-%m-%d")
         maintenance_prompt = f"""
-        You are a car maintenance expert analyzing the {document_name}. Based on the current mileage of {current_mileage:,} kilometers, extract maintenance schedules and generate reminders.
+        You are a car maintenance expert analyzing the {document_name}. Today's date is {today_str}. Based on the current mileage of {current_mileage:,} kilometers, extract maintenance schedules and generate reminders.
         
-        Please analyze the maintenance schedule and provide upcoming maintenance tasks in this exact JSON format:
+        Please analyze the maintenance schedule and provide 10 to 15 upcoming maintenance tasks in this exact JSON format:
         {{
             "reminders": [
                 {{
@@ -554,18 +555,18 @@ class CarCatalogRAG:
             ]
         }}
         
-        Focus on:
-        1. Immediate maintenance due (within 1,500 km of current mileage)
-        2. Upcoming maintenance (within 8,000 km of current mileage)
-        3. Regular maintenance intervals based on the manual
-        4. Safety-critical maintenance items
-        
-        Categories should be one of: oil_change, tire_rotation, brake_service, transmission_service, air_filter, spark_plugs, coolant_service, battery_service, general
-        Priority should be: high, medium, low
-        
-        Calculate realistic due dates based on average driving (1,500 km per month).
-        Use kilometers for all mileage values.
-        Return ONLY the JSON, no other text or explanation.
+        Requirements:
+        - Do NOT return dates in the past relative to {today_str}; if a task is overdue, set the dueDate to the next logical upcoming occurrence.
+        - Focus on the next 10,000 km of driving:
+          1. Immediate maintenance due (within 1,500 km of current mileage)
+          2. Upcoming maintenance (within 10,000 km of current mileage)
+          3. Regular maintenance intervals based on the manual
+          4. Safety-critical maintenance items
+        - Categories should be one of: oil_change, tire_rotation, brake_service, transmission_service, air_filter, spark_plugs, coolant_service, battery_service, general
+        - Priority should be: high, medium, low
+        - Calculate realistic due dates based on average driving (1,500 km per month).
+        - Use kilometers for all mileage values.
+        - Return ONLY the JSON, no other text or explanation.
         """
         
         try:
@@ -590,17 +591,65 @@ class CarCatalogRAG:
                 # If no JSON found, return fallback reminders
                 return self._generate_fallback_reminders(current_mileage)
             
-            # Convert to reminder format
+            # Convert to reminder format and enforce future due dates
             reminders = []
+            today = datetime.utcnow().date()
+            seen_keys = set()
+            
             for reminder in maintenance_data.get("reminders", []):
+                raw_due = reminder.get("dueDate")
+                try:
+                    due_date = datetime.strptime(raw_due, "%Y-%m-%d").date() if raw_due else (today + timedelta(days=30))
+                except Exception:
+                    due_date = today + timedelta(days=30)
+                
+                if due_date < today:
+                    # push past dates to near future (7 days ahead)
+                    due_date = today + timedelta(days=7)
+                
+                msg = reminder.get("message", "Maintenance required")
+                mileage_val = reminder.get("mileage", current_mileage + 1500)
+                key = (msg, mileage_val)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                
                 reminders.append({
                     "type": "maintenance",
-                    "dueDate": reminder.get("dueDate", (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")),
-                    "message": reminder.get("message", "Maintenance required"),
-                    "mileage": reminder.get("mileage", current_mileage + 1000),
+                    "dueDate": due_date.strftime("%Y-%m-%d"),
+                    "message": msg,
+                    "mileage": mileage_val,
                     "priority": reminder.get("priority", "medium"),
                     "category": reminder.get("category", "general")
                 })
+            
+            # Ensure at least 10 reminders by topping up with fallback ones
+            if len(reminders) < 10:
+                fallback = self._generate_fallback_reminders(current_mileage)
+                for fb in fallback:
+                    # normalize due date to not be in past
+                    try:
+                        fb_due = datetime.strptime(fb.get("dueDate"), "%Y-%m-%d").date()
+                    except Exception:
+                        fb_due = today + timedelta(days=30)
+                    if fb_due < today:
+                        fb_due = today + timedelta(days=7)
+                    fb_msg = fb.get("message", "Maintenance required")
+                    fb_mileage = fb.get("mileage", current_mileage + 1500)
+                    key = (fb_msg, fb_mileage)
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    reminders.append({
+                        "type": "maintenance",
+                        "dueDate": fb_due.strftime("%Y-%m-%d"),
+                        "message": fb_msg,
+                        "mileage": fb_mileage,
+                        "priority": fb.get("priority", "medium"),
+                        "category": fb.get("category", "general")
+                    })
+                    if len(reminders) >= 10:
+                        break
             
             return reminders
             
